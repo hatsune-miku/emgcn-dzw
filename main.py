@@ -9,22 +9,24 @@ import torch
 
 from tqdm import trange
 from argparse import Namespace
-from data import load_data_instances, DataIterator, label2id
+from typing import List, NamedTuple, Union, Tuple
+from data import load_data_instances, DataIterator, label2id, Instance
 from model import EMCGCN
+from torch import Tensor
 import utils
 import pickle
 import numpy as np
 
 from prepare_vocab import VocabHelp
-from transformers import AdamW, BertTokenizer
+from transformers import AdamW, BertTokenizer, BatchEncoding, BertModel
 from senticnet.senticnet import SenticNet
+from torch.optim import Optimizer
 
 # Typealias for Namespace.
 Arguments = Namespace
 
 
-# noinspection PyShadowingNames
-def get_bert_optimizer(model, args: Arguments):
+def get_bert_optimizer(model: torch.nn.Module, args: Arguments) -> Optimizer:
     # # Prepare optimizer and schedule (linear warmup and decay)
     no_decay = ['bias', 'LayerNorm.weight']
     diff_part = ["bert.embeddings", "bert.encoder"]
@@ -55,13 +57,11 @@ def get_bert_optimizer(model, args: Arguments):
             "lr": args.learning_rate
         },
     ]
-    optimizer = AdamW(optimizer_grouped_parameters, eps=args.adam_epsilon)
 
-    return optimizer
+    return AdamW(optimizer_grouped_parameters, eps=args.adam_epsilon)
 
 
-# noinspection PyShadowingNames
-def get_perturbed_matrix(args: Arguments, sentence_ids, mode):
+def get_perturbed_matrix(args: Arguments, sentence_ids: List[str], mode: str) -> Tensor:
     file = open(args.prefix + args.dataset + '/' + mode + '.json_' + args.pm_model_class + '_matrix.pickle', 'rb')
     matrix_dict = pickle.load(file)
 
@@ -80,13 +80,60 @@ def get_perturbed_matrix(args: Arguments, sentence_ids, mode):
     return results
 
 
-# noinspection PyShadowingNames
-def get_sentic(args: Arguments, sentences, token_ids, sn=SenticNet()):
+def get_sentence_embeddings(sentence: str, model: EMCGCN) -> Tensor:
+    tokenizer: BertTokenizer = model.tokenizer
+    bert_model: BertModel = model.bert_model
+    input_ids = tokenizer(sentence, return_tensors='pt')['input_ids']
+
+    with torch.no_grad():
+        outputs = bert_model.forward(input_ids=input_ids)
+        sentence_embeddings: torch.FloatTensor = outputs.last_hidden_state
+
+    # Implicit conversion to Tensor - FloatTensor is a subclass of Tensor
+    return sentence_embeddings
+
+
+def create_unperturbed_matrix(
+    sentence: str,
+    device: str,
+    max_sequence_len: int,
+    model: EMCGCN,
+) -> Tensor:
+    # 得到词向量
+    sentence_embeddings: Tensor = get_sentence_embeddings(sentence, model)
+
+    # Squeezed to zero because we only have one sentence
+    unprocessed_unperturbed_matrix: Tensor = sentence_embeddings.squeeze(0)
+    matrix_list = [unprocessed_unperturbed_matrix.to(device)]
+
+    # One because only one sentence
+    processed_unperturbed_matrix = torch.zeros((1, max_sequence_len, max_sequence_len), device=device)
+
+    # NOTE 把 CLS 和 SEP 行设为全 0
+    matrix_list[0][0, :] = torch.zeros(len(matrix_list[0][0, :]))
+    matrix_list[0][-1, :] = torch.zeros(len(matrix_list[0][-1, :]))
+    processed_unperturbed_matrix[0, :len(matrix_list[0]), :len(matrix_list[0])] = matrix_list[0]
+
+    return processed_unperturbed_matrix
+
+
+class GetSenticArguments(NamedTuple):
+    tokenizer: BertTokenizer
+    max_sequence_len: int
+    device: str
+
+
+def get_sentic(
+    args: Union[Arguments, GetSenticArguments],
+    sentences: List[str],
+    token_ids: Union[List[int], Tensor],
+    sn: SenticNet = SenticNet()
+) -> Tensor:
     """
     返回情感矩阵
     Return: [batch_size, max_seq_len, max_seq_len]: Tensor
     """
-    tokenizer = args.tokenizer
+    tokenizer: BertTokenizer = args.tokenizer
 
     results = torch.zeros((len(sentences), args.max_sequence_len, args.max_sequence_len), device=args.device)
     for batch_id, sentence in enumerate(sentences):
@@ -104,11 +151,10 @@ def get_sentic(args: Arguments, sentences, token_ids, sn=SenticNet()):
             word = word_list[i]
 
             if word in sn.data.keys():
-                # sentic = float(sn.concept(word)["polarity_value"]) + 1.0
                 # +1 保证平滑
-                # 不加1
                 sentic = float(sn.concept(word)["polarity_value"]) + 1.0
             else:
+                # 不加1
                 sentic = 0
 
             # 相加合并
@@ -140,8 +186,7 @@ def get_sentic(args: Arguments, sentences, token_ids, sn=SenticNet()):
     return results
 
 
-# noinspection PyShadowingNames
-def train(args: Arguments):
+def train(args: Arguments) -> None:
     """
     练！
     """
@@ -309,18 +354,156 @@ def train(args: Arguments):
             loss.backward()
             optimizer.step()
 
-        joint_precision, joint_recall, joint_f1 = model_eval(model, devset, args, test_dev='dev')
+        eval_result = model_eval(model, devset, args, test_dev='dev')
 
-        if joint_f1 > best_joint_f1:  # 得到最优的f1值
+        if eval_result.f1 > best_joint_f1:  # 得到最优的f1值
             model_path = args.model_dir + 'bert' + args.task + '.pt'
             torch.save(model, model_path)
-            best_joint_f1 = joint_f1
+            best_joint_f1 = eval_result.f1
             best_joint_epoch = i
-    print('best epoch: {}\tbest dev {} f1: {:.5f}\n\n'.format(best_joint_epoch, args.task, best_joint_f1))  # 输出
+
+    print('best epoch: {}\tbest dev {} f1: {:.5f}\n\n'.format(
+        best_joint_epoch, args.task, best_joint_f1))  # 输出
 
 
-# noinspection PyShadowingNames
-def model_eval(model: EMCGCN, dataset: DataIterator, args: Arguments, should_report=False, test_dev='test'):
+class ModelEvalResult(NamedTuple):
+    precision: float
+    recall: float
+    f1: float
+
+
+def model_predict_single(
+    text: str,
+    model: EMCGCN,
+    post_vocab: VocabHelp,
+    deprel_vocab: VocabHelp,
+    postag_vocab: VocabHelp,
+    synpost_vocab: VocabHelp,
+    device: str = 'cuda',
+    max_sequence_len: int = 102
+) -> List[Tuple[List[int], List[int], List[int]]]:
+    """
+    预测单个句子，返回预测结果
+    """
+    tokenizer: BertTokenizer = model.tokenizer
+
+    # 对输入的文本进行分词
+    encoded_dict: BatchEncoding = tokenizer(text, return_tensors='pt')
+
+    # 提取结果（ids和mask）
+    input_ids: List[int] = encoded_dict['input_ids']
+    mask = encoded_dict['attention_mask']
+    masks = torch.tensor(mask)
+
+    # ids转为tokens
+    tokens: List[str] = tokenizer.convert_ids_to_tokens(input_ids)
+
+    # 只有一个句子呀，那就一个吧
+    sentences = [text]
+    sentic_matrixs = get_sentic(
+        args=GetSenticArguments(
+            tokenizer=tokenizer,
+            max_sequence_len=max_sequence_len,
+            device=device
+        ),
+        sentences=sentences,
+        token_ids=input_ids
+    )
+
+    # 预测需要的是unperturbed_matrix
+    perturbed_matrix = create_unperturbed_matrix(text, device, max_sequence_len, model)
+
+    token_range = Instance.get_token_range(
+        tokens=tokens,
+        tokenizer=tokenizer
+    )
+
+    word_pair_position = Instance.get_word_pair_position(
+        max_sequence_len=max_sequence_len,
+        tokens=tokens,
+        token_range=token_range,
+        post_vocab=post_vocab
+    )
+
+    # TODO: head和deprel
+    word_pair_deprel = Instance.get_word_pair_deprel(
+        max_sequence_len=max_sequence_len,
+        head=[0] * len(tokens),
+        tokens=tokens,
+        deprel=[''] * len(tokens),
+        token_range=token_range,
+        deprel_vocab=deprel_vocab
+    )
+
+    # TODO: postag
+    word_pair_pos = Instance.get_word_pair_pos(
+        max_sequence_len=max_sequence_len,
+        tokens=tokens,
+        postag=[''] * len(tokens),
+        token_range=token_range,
+        postag_vocab=postag_vocab
+    )
+
+    # TODO: head
+    word_pair_synpost = Instance.get_word_pair_synpost(
+        max_sequence_len=max_sequence_len,
+        head=[0] * len(tokens),
+        tokens=tokens,
+        token_range=token_range,
+        synpost_vocab=synpost_vocab
+    )
+
+    tokens: Tensor = torch.tensor(tokens)
+
+    with torch.no_grad():
+        predict_list: List[Tensor] = model.forward(
+            tokens=tokens,
+            masks=masks,
+            sentic_matrixs=sentic_matrixs,
+            perturbed_matrix=perturbed_matrix,
+            word_pair_position=word_pair_position,
+            word_pair_deprel=word_pair_deprel,
+            word_pair_pos=word_pair_pos,
+            word_pair_synpost=word_pair_synpost
+        )
+
+        predict: Tensor = predict_list[-1]
+        predict = torch.nn.functional.softmax(predict, dim=-1)
+        predict = torch.argmax(predict, dim=3)
+
+    # sen_length说的是token的数量
+    sen_length = len(tokens)
+    predict_cpu: List[List[int]] = predict.cpu().tolist()
+
+    opinions = utils.get_opinions(
+        tags=predict_cpu,
+        length=sen_length,
+        token_range=token_range
+    )
+
+    aspects = utils.get_aspects(
+        tags=predict_cpu,
+        length=sen_length,
+        token_range=token_range
+    )
+
+    polarities = utils.get_polarities(
+        tags=predict_cpu,
+        length=sen_length,
+        token_range=token_range
+    )
+
+    triple_list = list(zip(opinions, aspects, polarities))
+    return triple_list
+
+
+def model_eval(
+    model: EMCGCN,
+    dataset: DataIterator,
+    args: Arguments,
+    should_report: bool = False,
+    test_dev: str = 'test'
+) -> ModelEvalResult:
     # 在评估模式下，batchNorm层，dropout层等用于优化训练而添加的网络层会被关闭，从而使得评估时不会发生偏移。
     with torch.no_grad():
         all_ids = []
@@ -331,39 +514,43 @@ def model_eval(model: EMCGCN, dataset: DataIterator, args: Arguments, should_rep
         all_sens_lengths = []
         all_token_ranges = []
         for i in range(dataset.batch_count):
-            sentence_ids, sentences, tokens, lengths, masks, sens_lens, token_ranges, aspect_tags, tags, \
-                word_pair_position, word_pair_deprel, word_pair_pos, word_pair_synpost, tags_symmetry \
-                = dataset.get_batch(i)
-            sentic_matrixs = get_sentic(args, sentences, tokens)
-            perturbed_matrix = get_perturbed_matrix(args, sentence_ids, test_dev)
+            batch = dataset.get_batch(i)
+            sentic_matrixs = get_sentic(args, batch.sentences, batch.bert_tokens)
+            perturbed_matrix = get_perturbed_matrix(args, batch.sentence_ids, test_dev)
 
-            preds = model(
-                tokens=tokens,
-                masks=masks,
+            preds = model.forward(
+                tokens=batch.bert_tokens,
+                masks=batch.masks,
                 sentic_matrixs=sentic_matrixs,
                 perturbed_matrix=perturbed_matrix,
-                word_pair_position=word_pair_position,
-                word_pair_deprel=word_pair_deprel,
-                word_pair_pos=word_pair_pos,
-                word_pair_synpost=word_pair_synpost
+                word_pair_position=batch.word_pair_position,
+                word_pair_deprel=batch.word_pair_deprel,
+                word_pair_pos=batch.word_pair_pos,
+                word_pair_synpost=batch.word_pair_synpost
             )
             preds = preds[-1]
             preds = torch.nn.functional.softmax(preds, dim=-1)
             preds = torch.argmax(preds, dim=3)
             all_preds.append(preds)
-            all_labels.append(tags)
-            all_lengths.append(lengths)
-            all_sens_lengths.extend(sens_lens)
-            all_token_ranges.extend(token_ranges)
-            all_ids.extend(sentence_ids)
-            all_sentences.extend(sentences)
+            all_labels.append(batch.tags)
+            all_lengths.append(batch.lengths)
+            all_sens_lengths.extend(batch.sens_lens)
+            all_token_ranges.extend(batch.token_ranges)
+            all_ids.extend(batch.sentence_ids)
+            all_sentences.extend(batch.sentences)
 
         all_preds = torch.cat(all_preds, dim=0).cpu().tolist()
         all_labels = torch.cat(all_labels, dim=0).cpu().tolist()
         all_lengths = torch.cat(all_lengths, dim=0).cpu().tolist()
 
-        metric = utils.Metric(args, all_preds, all_labels, all_lengths, all_sens_lengths, all_token_ranges,
-                              ignore_index=-1)
+        metric = utils.Metric(
+            args=args,
+            predictions=all_preds,
+            goldens=all_labels,
+            bert_lengths=all_lengths,
+            sen_lengths=all_sens_lengths,
+            tokens_ranges=all_token_ranges
+        )
         precision, recall, f1 = metric.score_uniontags()
         aspect_results = metric.score_aspect()
         opinion_results = metric.score_opinion()
@@ -377,10 +564,9 @@ def model_eval(model: EMCGCN, dataset: DataIterator, args: Arguments, should_rep
             metric.tagReport()
 
     model.train()
-    return precision, recall, f1
+    return ModelEvalResult(precision, recall, f1)
 
 
-# noinspection PyShadowingNames
 def test(args: Arguments):
     print("Evaluation on testset:")
     model_path = args.model_dir + 'bert' + args.task + '.pt'
@@ -396,7 +582,7 @@ def test(args: Arguments):
     model_eval(model, testset, args, False)
 
 
-if __name__ == '__main__':
+def main():
     parser = argparse.ArgumentParser()
 
     # 数据集文件路径前缀
@@ -482,3 +668,7 @@ if __name__ == '__main__':
     if args.mode == 'train':
         train(args)
     test(args)
+
+
+if __name__ == '__main__':
+    main()

@@ -134,7 +134,6 @@ class Instance(object):
         self.length: int = len(self.bert_tokens)
 
         # bert的输入序列统一长度max_sequence
-
         self.bert_tokens_padding: Tensor = torch.zeros(args.max_sequence_len).long()
 
         # 用来记录序列中属于方面词的位置
@@ -160,11 +159,7 @@ class Instance(object):
         self.mask[:self.length] = 1
 
         # 计算每个token对应的数字序列的开始地址和结束地址,因为有的词需要占用两个位置
-        token_start = 1
-        for i, w, in enumerate(self.tokens):
-            token_end = token_start + len(tokenizer.encode(w, add_special_tokens=False))
-            self.token_range.append([token_start, token_end - 1])
-            token_start = token_end
+        self.token_range = Instance.get_token_range(self.tokens, tokenizer)
         assert self.length == self.token_range[-1][-1] + 2  # 多了CLS, SEP，
 
         # padding部分设置为-1
@@ -334,77 +329,156 @@ class Instance(object):
                 self.tags_symmetry[j][i] = self.tags_symmetry[i][j]
 
         # 1. generate position index of the word pair
-        # 词与词之间在句子中的相对位置距离，最后生成的都是102 x 102的矩阵
-        # 初始化
-        self.word_pair_position: Tensor = torch.zeros(args.max_sequence_len, args.max_sequence_len).long()
-
-        # 句子中词的个数的迭代
-        for i in range(0, len(self.tokens)):
-            # 每个词对应的token的开始index和结束index
-            start = self.token_range[i][0]
-            end = self.token_range[i][1]
-
-            for j in range(0, len(self.tokens)):
-                s = self.token_range[j][0]
-                e = self.token_range[j][1]
-                for row in range(start, end + 1):
-                    for col in range(s, e + 1):
-                        self.word_pair_position[row][col] = post_vocab.stoi.get(abs(row - col), post_vocab.unk_index)
+        self.word_pair_position: Tensor = Instance.get_word_pair_position(
+            max_sequence_len=args.max_sequence_len,
+            tokens=self.tokens,
+            token_range=self.token_range,
+            post_vocab=post_vocab
+        )
 
         # 2. generate deprel index of the word pair
+        self.word_pair_deprel: Tensor = Instance.get_word_pair_deprel(
+            max_sequence_len=args.max_sequence_len,
+            head=self.head,
+            tokens=self.tokens,
+            deprel=self.deprel,
+            token_range=self.token_range,
+            deprel_vocab=deprel_vocab
+        )
+
+        # 3. generate POS tag index of the word pair
+        # 词性标注
+        self.word_pair_pos: Tensor = Instance.get_word_pair_pos(
+            max_sequence_len=args.max_sequence_len,
+            tokens=self.tokens,
+            postag=self.postag,
+            token_range=self.token_range,
+            postag_vocab=postag_vocab
+        )
+
+        # 4. generate synpost index of the word pair
+        # 基于句法的相对位置
+        self.word_pair_synpost: Tensor = Instance.get_word_pair_synpost(
+            max_sequence_len=args.max_sequence_len,
+            head=self.head,
+            tokens=self.tokens,
+            token_range=self.token_range,
+            synpost_vocab=synpost_vocab
+        )
+
+    @staticmethod
+    def get_token_range(
+        tokens: List[str],
+        tokenizer: BertTokenizer,
+    ) -> TokenRange:
+        token_start = 1
+        ret: TokenRange = []
+        for i, w, in enumerate(tokens):
+            token_end = token_start + len(tokenizer.encode(w, add_special_tokens=False))
+            ret.append([token_start, token_end - 1])
+            token_start = token_end
+        return ret
+
+    @staticmethod
+    def get_word_pair_position(
+        max_sequence_len: int,
+        tokens: List[str],
+        token_range: TokenRange,
+        post_vocab: VocabHelp
+    ) -> Tensor:
+        ret: Tensor = torch.zeros(max_sequence_len, max_sequence_len).long()
+
+        # 句子中词的个数的迭代
+        for i in range(0, len(tokens)):
+            # 每个词对应的token的开始index和结束index
+            start = token_range[i][0]
+            end = token_range[i][1]
+
+            for j in range(0, len(tokens)):
+                s = token_range[j][0]
+                e = token_range[j][1]
+                for row in range(start, end + 1):
+                    for col in range(s, e + 1):
+                        ret[row][col] = post_vocab.stoi.get(abs(row - col), post_vocab.unk_index)
+        return ret
+
+    @staticmethod
+    def get_word_pair_deprel(
+        max_sequence_len: int,
+        head: List[int],
+        tokens: List[str],
+        deprel: List[str],
+        token_range: TokenRange,
+        deprel_vocab: VocabHelp
+    ) -> Tensor:
+        # 2. generate deprel index of the word pair
         # 依赖关系
-        self.word_pair_deprel: Tensor = torch.zeros(args.max_sequence_len, args.max_sequence_len).long()
-        for i in range(0, len(self.tokens)):
-            start = self.token_range[i][0]
-            end = self.token_range[i][1]
+        ret: Tensor = torch.zeros(max_sequence_len, max_sequence_len).long()
+        for i in range(0, len(tokens)):
+            start = token_range[i][0]
+            end = token_range[i][1]
 
             for j in range(start, end + 1):
-                if self.head[i] != 0:
-                    s, e = self.token_range[self.head[i] - 1]
+                if head[i] != 0:
+                    s, e = token_range[head[i] - 1]
                 else:
                     s, e = 0, 0
 
                 for k in range(s, e + 1):
-                    self.word_pair_deprel[j][k] = deprel_vocab.stoi.get(self.deprel[i])
-                    self.word_pair_deprel[k][j] = deprel_vocab.stoi.get(self.deprel[i])
-                    self.word_pair_deprel[j][j] = deprel_vocab.stoi.get('self')
+                    ret[j][k] = deprel_vocab.stoi.get(deprel[i])
+                    ret[k][j] = deprel_vocab.stoi.get(deprel[i])
+                    ret[j][j] = deprel_vocab.stoi.get('self')
+        return ret
 
-        # 3. generate POS tag index of the word pair
-        # 词性标注
-        self.word_pair_pos: Tensor = torch.zeros(args.max_sequence_len, args.max_sequence_len).long()
-        for i in range(0, len(self.tokens)):
-            start, end = self.token_range[i][0], self.token_range[i][1]
+    @staticmethod
+    def get_word_pair_pos(
+        max_sequence_len: int,
+        tokens: List[str],
+        postag: List[str],
+        token_range: TokenRange,
+        postag_vocab: VocabHelp
+    ) -> Tensor:
+        ret: Tensor = torch.zeros(max_sequence_len, max_sequence_len).long()
+        for i in range(0, len(tokens)):
+            start, end = token_range[i][0], token_range[i][1]
 
-            for j in range(0, len(self.tokens)):
-                s, e = self.token_range[j][0], self.token_range[j][1]
+            for j in range(0, len(tokens)):
+                s, e = token_range[j][0], token_range[j][1]
 
                 for row in range(start, end + 1):
                     for col in range(s, e + 1):
-                        self.word_pair_pos[row][col] = postag_vocab.stoi.get(
-                            tuple(sorted([self.postag[i], self.postag[j]]))
+                        ret[row][col] = postag_vocab.stoi.get(
+                            tuple(sorted([postag[i], postag[j]]))
                         )
+        return ret
 
-        # 4. generate synpost index of the word pair
-        # 基于句法的相对位置
-        self.word_pair_synpost: Tensor = torch.zeros(args.max_sequence_len, args.max_sequence_len).long()
-        tmp = [[0] * len(self.tokens) for _ in range(len(self.tokens))]
+    @staticmethod
+    def get_word_pair_synpost(
+        max_sequence_len: int,
+        head: List[int],
+        tokens: List[str],
+        token_range: TokenRange,
+        synpost_vocab: VocabHelp
+    ) -> Tensor:
+        ret: Tensor = torch.zeros(max_sequence_len, max_sequence_len).long()
+        tmp = [[0] * len(tokens) for _ in range(len(tokens))]
 
-        for i in range(0, len(self.tokens)):
-            j = self.head[i]
+        for i in range(0, len(tokens)):
+            j = head[i]
             if j == 0:
                 continue
             tmp[i][j - 1] = 1
             tmp[j - 1][i] = 1
 
         tmp_dict = defaultdict(list)
-        for i in range(len(self.tokens)):
-            for j in range(len(self.tokens)):
+        for i in range(len(tokens)):
+            for j in range(len(tokens)):
                 if tmp[i][j] == 1:
                     tmp_dict[i].append(j)
 
-        word_level_degree = [[4] * len(self.tokens) for _ in range(len(self.tokens))]
+        word_level_degree = [[4] * len(tokens) for _ in range(len(tokens))]
 
-        for i in range(len(self.tokens)):
+        for i in range(len(tokens)):
             node_set = set()
             word_level_degree[i][i] = 0
             node_set.add(i)
@@ -424,15 +498,16 @@ class Instance(object):
                                 word_level_degree[i][g] = 3
                                 node_set.add(g)
 
-        for i in range(len(self.tokens)):
-            start, end = self.token_range[i][0], self.token_range[i][1]
-            for j in range(len(self.tokens)):
-                s, e = self.token_range[j][0], self.token_range[j][1]
+        for i in range(len(tokens)):
+            start, end = token_range[i][0], token_range[i][1]
+            for j in range(len(tokens)):
+                s, e = token_range[j][0], token_range[j][1]
                 for row in range(start, end + 1):
                     for col in range(s, e + 1):
-                        self.word_pair_synpost[row][col] = synpost_vocab.stoi.get(
+                        ret[row][col] = synpost_vocab.stoi.get(
                             word_level_degree[i][j],
                             synpost_vocab.unk_index)
+        return ret
 
 
 # 加载实例，实例中包括了四种类型的句子特征的矩阵 + biaffine attention用到的相关数据

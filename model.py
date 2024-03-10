@@ -1,16 +1,17 @@
-import argparse
-
 import torch
 import torch.nn
 import torch.nn as nn
 import torch.nn.functional as nnf
+from torch import Tensor
 from transformers import BertModel, BertTokenizer
-
-Arguments = argparse.Namespace
+from arguments import Arguments
+from typing import List, Tuple
 
 
 class LayerNorm(nn.Module):
     """Construct a layernorm module (See citation for details)."""
+    a_2: nn.Parameter
+    b_2: nn.Parameter
 
     def __init__(self, features, eps=1e-6):
         super(LayerNorm, self).__init__()
@@ -115,8 +116,10 @@ class GATLayer(nn.Module):
         return node_outputs, edge_outputs
 
 
+# TODO: unused
+"""
 class GraphConvLayer(nn.Module):
-    """A GCN module operated on dependency graphs. """
+    ""A GCN module operated on dependency graphs. ""
 
     def __init__(self, device, gcn_dim, edge_dim, dep_embed_dim, pooling='avg'):
         super(GraphConvLayer, self).__init__()
@@ -177,10 +180,24 @@ class GraphConvLayer(nn.Module):
         edge_outputs = self.highway(weight_adj, node_outputs1, node_outputs2)
 
         return node_outputs, edge_outputs
+"""
 
 
 class Biaffine(nn.Module):
-    def __init__(self, args: Arguments, in1_features, in2_features, out_features, bias=(True, True)):
+    args: Arguments
+    in1_features: int
+    in2_features: int
+    out_features: int
+    bias: Tuple[bool, bool]
+
+    def __init__(
+        self,
+        args: Arguments,
+        in1_features: int,
+        in2_features: int,
+        out_features: int,
+        bias: Tuple[bool, bool] = (True, True)
+    ):
         super(Biaffine, self).__init__()
         self.args: Arguments = args
         self.in1_features = in1_features  # 300
@@ -202,7 +219,11 @@ class Biaffine(nn.Module):
         )
 
     # input1和input2分别是300维的词向量a和词向量o
-    def forward(self, input1, input2):
+    def forward(
+        self,
+        input1: Tensor,
+        input2: Tensor
+    ) -> Tensor:
         # 16 x 句子1的token长度 x dim
         batch_size, len1, dim1 = input1.size()
 
@@ -242,7 +263,7 @@ class Biaffine(nn.Module):
 
 # 定义 Multi-Head Attention 模块
 class MultiHeadAttention(nn.Module):
-    def __init__(self, input_dim, output_dim, num_heads):
+    def __init__(self, input_dim: int, output_dim: int, num_heads: int):
         super(MultiHeadAttention, self).__init__()
         self.input_dim = input_dim
         self.output_dim = output_dim
@@ -253,11 +274,16 @@ class MultiHeadAttention(nn.Module):
         self.value_fc = nn.Linear(input_dim, input_dim, bias=False)
         self.out_fc = nn.Linear(input_dim, output_dim, bias=False)
 
-    def forward(self, query, key, value):
+    def forward(self, query: Tensor, key: Tensor, value: Tensor):
         # 将输入张量拆分为 num_heads 个头部，并进行线性变换
-        query_heads = self.query_fc(query).view(-1, self.num_heads, query.shape[-2], self.head_dim)
-        key_heads = self.key_fc(key).view(-1, self.num_heads, key.shape[-2], self.head_dim)
-        value_heads = self.value_fc(value).view(-1, self.num_heads, value.shape[-2], self.head_dim)
+        query_heads = self.query_fc.forward(query) \
+            .view(-1, self.num_heads, query.shape[-2], self.head_dim)
+
+        key_heads = self.key_fc.forward(key) \
+            .view(-1, self.num_heads, key.shape[-2], self.head_dim)
+
+        value_heads = self.value_fc.forward(value) \
+            .view(-1, self.num_heads, value.shape[-2], self.head_dim)
 
         # 将每个头部的 query, key 和 value 分别拆分，并计算得分矩阵
         attention_scores = torch.matmul(query_heads, key_heads.transpose(-2, -1)) / self.head_dim ** 0.5
@@ -343,17 +369,17 @@ class EMCGCN(torch.nn.Module):
 
     def forward(
         self,
-        tokens,
-        masks,
-        sentic_matrixs,
-        perturbed_matrix,
-        word_pair_position,
-        word_pair_deprel,
-        word_pair_pos,
-        word_pair_synpost
-    ):
-        bert_feature, _ = self.bert(tokens, masks, return_dict=False)
-        bert_feature = self.dropout_output(bert_feature)
+        tokens: Tensor,
+        masks: Tensor,
+        sentic_matrixs: Tensor,
+        perturbed_matrix: Tensor,
+        word_pair_position: Tensor,
+        word_pair_deprel: Tensor,
+        word_pair_pos: Tensor,
+        word_pair_synpost: Tensor
+    ) -> List[Tensor]:
+        bert_feature, _ = self.bert.forward(tokens, masks, return_dict=False)
+        bert_feature = self.dropout_output.forward(bert_feature)
 
         # 16 x 102
         batch, seq = masks.shape
@@ -362,37 +388,37 @@ class EMCGCN(torch.nn.Module):
         tensor_masks = masks.unsqueeze(1).expand(batch, seq, seq).unsqueeze(-1)
 
         # * multi-feature 16 x 102 x 102 x 10也就是说这个时候进行向量化
-        word_pair_post_emb = self.post_emb(word_pair_position)
-        word_pair_deprel_emb = self.deprel_emb(word_pair_deprel)
-        word_pair_postag_emb = self.postag_emb(word_pair_pos)
-        word_pair_synpost_emb = self.synpost_emb(word_pair_synpost)
+        word_pair_post_emb: Tensor = self.post_emb.forward(word_pair_position)
+        word_pair_deprel_emb: Tensor = self.deprel_emb.forward(word_pair_deprel)
+        word_pair_postag_emb: Tensor = self.postag_emb.forward(word_pair_pos)
+        word_pair_synpost_emb: Tensor = self.synpost_emb.forward(word_pair_synpost)
 
         # BiAffine
         # 对应论文中的MLPa
-        ap_node = nnf.relu(self.ap_fc(bert_feature))
+        ap_node = nnf.relu(self.ap_fc.forward(bert_feature))
 
         # 对应论文中MLPo
-        op_node = nnf.relu(self.op_fc(bert_feature))
+        op_node = nnf.relu(self.op_fc.forward(bert_feature))
 
         # 16 x 102 x 102 x 10 gcn的边关系输入
-        biaffine_edge = self.triplet_biaffine(ap_node, op_node)
+        biaffine_edge: Tensor = self.triplet_biaffine.forward(ap_node, op_node)
 
         # Sentic
         sentic_matrixs = sentic_matrixs.unsqueeze(len(sentic_matrixs.shape))
-        sentic_matrixs_emb = self.sentic_dense(sentic_matrixs)
+        sentic_matrixs_emb: Tensor = self.sentic_dense.forward(sentic_matrixs)
 
         # Impact Matrix
         perturbed_matrix = perturbed_matrix.unsqueeze(len(perturbed_matrix.shape))
-        perturbed_matrix_emb = self.pm_dense(perturbed_matrix)
+        perturbed_matrix_emb: Tensor = self.pm_dense.forward(perturbed_matrix)
 
         # 压缩，通过全链接网络变换一下维度 gcn的词向量输入
-        gcn_input = nnf.relu(self.dense(bert_feature))
+        gcn_input = nnf.relu(self.dense.forward(bert_feature))
 
         # 上一层的output是下一层的input
         gcn_outputs = gcn_input
 
         # 各种R
-        weight_prob_list = [
+        weight_prob_list: List[Tensor] = [
             sentic_matrixs_emb,
             perturbed_matrix_emb,
             biaffine_edge,
@@ -412,10 +438,9 @@ class EMCGCN(torch.nn.Module):
         # word_pair_postag_emb_softmax = F.softmax(word_pair_postag_emb, dim=-1) * tensor_masks
         # word_pair_synpost_emb_softmax = F.softmax(word_pair_synpost_emb, dim=-1) * tensor_masks
 
-        self_loop = []
+        self_loop: List[Tensor] = []
         for _ in range(batch):
-            self_loop.append(
-                torch.eye(seq))
+            self_loop.append(torch.eye(seq))
 
         # torch.eye()生成对角钱全1， 其余部分为0的二维数组
         # batchsize = 16 -> 16个102 x 102 对角线为1 的多维矩阵
@@ -449,7 +474,7 @@ class EMCGCN(torch.nn.Module):
             ],
             dim=-1
         )
-        weight_prob = self.attention(weight_prob, weight_prob, weight_prob)
+        weight_prob = self.attention.forward(weight_prob, weight_prob, weight_prob)
         weight_prob = weight_prob.reshape(
             -1, self.args.max_sequence_len,
             self.args.max_sequence_len,
@@ -458,10 +483,10 @@ class EMCGCN(torch.nn.Module):
         weight_prob_softmax = nnf.softmax(weight_prob, dim=-1) * tensor_masks
 
         # 图卷积神经网络
-        for _layer in range(self.num_layers):
+        for _layer in range(0, self.num_layers):
             # [batch, seq, dim]
             layer = self.gcn_layers[_layer]
-            gcn_outputs, weight_prob = layer(
+            gcn_outputs, weight_prob = layer.forward(
                 weight_prob_softmax,
                 weight_prob,
                 gcn_outputs,

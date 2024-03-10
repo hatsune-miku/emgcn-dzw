@@ -1,12 +1,19 @@
 import numpy as np
 from sklearn import metrics
-from data import label2id, id2label
+from data import label2id, id2label, TokenRange
+from typing import List
+from arguments import Arguments
 
 
-def get_aspects(tags, length, token_range, ignore_index=-1):
+def get_aspects(
+    tags: List[List[int]],
+    length: int,
+    token_range: TokenRange,
+    ignore_index: int = -1
+) -> List[List[int]]:
     spans = []
     start, end = -1, -1
-    for i in range(length):
+    for i in range(0, length):
         l, r = token_range[i]
         if tags[l][l] == ignore_index:
             continue
@@ -22,12 +29,17 @@ def get_aspects(tags, length, token_range, ignore_index=-1):
                 spans.append([start, end])
                 start, end = -1, -1
     if start != -1:
-        spans.append([start, length-1])
-    
+        spans.append([start, length - 1])
+
     return spans
 
 
-def get_opinions(tags, length, token_range, ignore_index=-1):
+def get_opinions(
+    tags: List[List[int]],
+    length: int,
+    token_range: TokenRange,
+    ignore_index: int = -1
+) -> List[List[int]]:
     spans = []
     start, end = -1, -1
     for i in range(length):
@@ -46,13 +58,50 @@ def get_opinions(tags, length, token_range, ignore_index=-1):
                 spans.append([start, end])
                 start, end = -1, -1
     if start != -1:
-        spans.append([start, length-1])
-    
+        spans.append([start, length - 1])
+
     return spans
 
 
-class Metric():
-    def __init__(self, args, predictions, goldens, bert_lengths, sen_lengths, tokens_ranges, ignore_index=-1):
+def get_polarities(
+    tags: List[List[int]],
+    length: int,
+    token_range: TokenRange,
+    ignore_index: int = -1
+) -> List[List[int]]:
+    spans = []
+    start, end = -1, -1
+    for i in range(length):
+        l, r = token_range[i]
+        if tags[l][l] == ignore_index:
+            continue
+        label = id2label[tags[l][l]]
+        if label == 'B-P':
+            if start != -1:
+                spans.append([start, end])
+            start, end = i, i
+        elif label == 'I-P':
+            end = i
+        else:
+            if start != -1:
+                spans.append([start, end])
+                start, end = -1, -1
+    if start != -1:
+        spans.append([start, length - 1])
+
+    return spans
+
+
+class Metric:
+    def __init__(
+        self,
+        args: Arguments,
+        predictions,
+        goldens,
+        bert_lengths,
+        sen_lengths,
+        tokens_ranges
+    ):
         self.args = args
         self.predictions = predictions
         self.goldens = goldens
@@ -125,7 +174,7 @@ class Metric():
                     print('wrong!!!!!!!!!!!!!!!!!!!!')
                     exit()
                 triplets_utm.append([al, ar, pl, pr, sentiment])
-        
+
         return triplets_utm
 
     def score_aspect(self):
@@ -171,31 +220,49 @@ class Metric():
         golden_set = set()
         predicted_set = set()
         for i in range(self.data_num):
-            golden_aspect_spans = get_aspects(self.goldens[i], self.sen_lengths[i], self.tokens_ranges[i])
-            golden_opinion_spans = get_opinions(self.goldens[i], self.sen_lengths[i], self.tokens_ranges[i])
+            golden_aspect_spans = get_aspects(
+                self.goldens[i],
+                self.sen_lengths[i],
+                self.tokens_ranges[i]
+            )
+            golden_opinion_spans = get_opinions(
+                self.goldens[i],
+                self.sen_lengths[i],
+                self.tokens_ranges[i]
+            )
             if self.args.task == 'pair':
-                golden_tuples = self.find_pair(self.goldens[i], golden_aspect_spans, golden_opinion_spans, self.tokens_ranges[i])
+                golden_tuples = self.find_pair(
+                    self.goldens[i], golden_aspect_spans, golden_opinion_spans,
+                    self.tokens_ranges[i])
             elif self.args.task == 'triplet':
-                golden_tuples = self.find_triplet(self.goldens[i], golden_aspect_spans, golden_opinion_spans, self.tokens_ranges[i])
+                golden_tuples = self.find_triplet(
+                    self.goldens[i], golden_aspect_spans, golden_opinion_spans,
+                    self.tokens_ranges[i])
+            else:
+                raise ValueError('task should be pair or triplet')
             for pair in golden_tuples:
                 golden_set.add(str(i) + '-' + '-'.join(map(str, pair)))
 
             predicted_aspect_spans = get_aspects(self.predictions[i], self.sen_lengths[i], self.tokens_ranges[i])
             predicted_opinion_spans = get_opinions(self.predictions[i], self.sen_lengths[i], self.tokens_ranges[i])
             if self.args.task == 'pair':
-                predicted_tuples = self.find_pair(self.predictions[i], predicted_aspect_spans, predicted_opinion_spans, self.tokens_ranges[i])
+                predicted_tuples = self.find_pair(self.predictions[i], predicted_aspect_spans, predicted_opinion_spans,
+                                                  self.tokens_ranges[i])
             elif self.args.task == 'triplet':
-                predicted_tuples = self.find_triplet(self.predictions[i], predicted_aspect_spans, predicted_opinion_spans, self.tokens_ranges[i])
+                predicted_tuples = self.find_triplet(self.predictions[i], predicted_aspect_spans,
+                                                     predicted_opinion_spans, self.tokens_ranges[i])
+            else:
+                raise ValueError('task should be pair or triplet')
+
             for pair in predicted_tuples:
                 predicted_set.add(str(i) + '-' + '-'.join(map(str, pair)))
-            
+
         correct_num = len(golden_set & predicted_set)
         precision = correct_num / len(predicted_set) if len(predicted_set) > 0 else 0
         recall = correct_num / len(golden_set) if len(golden_set) > 0 else 0
         f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
         return precision, recall, f1
 
-    
     def score_uniontags_print(self):
         assert len(self.predictions) == len(self.goldens)
         golden_set = set()
@@ -206,21 +273,29 @@ class Metric():
             golden_aspect_spans = get_aspects(self.goldens[i], self.sen_lengths[i], self.tokens_ranges[i])
             golden_opinion_spans = get_opinions(self.goldens[i], self.sen_lengths[i], self.tokens_ranges[i])
             if self.args.task == 'pair':
-                golden_tuples = self.find_pair(self.goldens[i], golden_aspect_spans, golden_opinion_spans, self.tokens_ranges[i])
+                golden_tuples = self.find_pair(self.goldens[i], golden_aspect_spans, golden_opinion_spans,
+                                               self.tokens_ranges[i])
             elif self.args.task == 'triplet':
-                golden_tuples = self.find_triplet(self.goldens[i], golden_aspect_spans, golden_opinion_spans, self.tokens_ranges[i])
+                golden_tuples = self.find_triplet(self.goldens[i], golden_aspect_spans, golden_opinion_spans,
+                                                  self.tokens_ranges[i])
+            else:
+                raise ValueError('task should be pair or triplet')
             for pair in golden_tuples:
                 golden_set.add(str(i) + '-' + '-'.join(map(str, pair)))
 
             predicted_aspect_spans = get_aspects(self.predictions[i], self.sen_lengths[i], self.tokens_ranges[i])
             predicted_opinion_spans = get_opinions(self.predictions[i], self.sen_lengths[i], self.tokens_ranges[i])
             if self.args.task == 'pair':
-                predicted_tuples = self.find_pair(self.predictions[i], predicted_aspect_spans, predicted_opinion_spans, self.tokens_ranges[i])
+                predicted_tuples = self.find_pair(self.predictions[i], predicted_aspect_spans, predicted_opinion_spans,
+                                                  self.tokens_ranges[i])
             elif self.args.task == 'triplet':
-                predicted_tuples = self.find_triplet(self.predictions[i], predicted_aspect_spans, predicted_opinion_spans, self.tokens_ranges[i])
+                predicted_tuples = self.find_triplet(self.predictions[i], predicted_aspect_spans,
+                                                     predicted_opinion_spans, self.tokens_ranges[i])
+            else:
+                raise ValueError('task should be pair or triplet')
             for pair in predicted_tuples:
                 predicted_set.add(str(i) + '-' + '-'.join(map(str, pair)))
-            
+
             all_golden_triplets.append(golden_tuples)
             all_predicted_triplets.append(predicted_tuples)
 
@@ -243,7 +318,7 @@ class Metric():
                         continue
                     golden_tags.append(self.goldens[i][r][c])
                     predict_tags.append(self.predictions[i][r][c])
-        
+
         print(len(golden_tags))
         print(len(predict_tags))
         target_names = ['N', 'B-A', 'I-A', 'A', 'B-O', 'I-O', 'O', 'negative', 'neutral', 'positive']

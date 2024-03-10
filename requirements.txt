@@ -1,6 +1,15 @@
 torch==1.13.0+cu116
+
+# Please ignore vulnerability warnings as the project just want this version
 transformers==3.4.0
+
 argparse==1.1
+
+# Please ignore vulnerability warnings as the project just want this version
 protobuf==3.19.0
+
 scikit-learn==1.0.2
 senticnet==1.6
+wordcloud==1.9.3
+nltk==3.8.1
+matplotlib==3.5.3

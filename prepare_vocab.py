@@ -6,7 +6,11 @@ import json
 import pickle
 import argparse
 from collections import Counter
+from typing import Any, List, Tuple, NamedTuple
 
+# A type alias for JSON.
+
+JSON = Any
 Arguments = argparse.Namespace
 DefaultSpecials = ['<pad>', '<unk>']
 
@@ -52,7 +56,7 @@ class VocabHelp(object):
         with open(vocab_path, "rb") as f:
             return pickle.load(f)
 
-    def save_vocab(self, vocab_path: str):
+    def save_vocab(self, vocab_path: str) -> None:
         with open(vocab_path, "wb") as f:
             pickle.dump(self, f)
 
@@ -65,7 +69,7 @@ def parse_args() -> Arguments:
     return parser.parse_args()
 
 
-def main():
+def main() -> None:
     args = parse_args()
 
     # input files
@@ -88,43 +92,42 @@ def main():
 
     # load files
     print("loading files...")
-    train_tokens, train_deprel, train_postag, train_postag_ca, train_max_len = load_tokens(train_file)
-    dev_tokens, dev_deprel, dev_postag, dev_postag_ca, dev_max_len = load_tokens(dev_file)
-    test_tokens, test_deprel, test_postag, test_postag_ca, test_max_len = load_tokens(test_file)
+    train: TokenData = load_tokens(train_file)
+    dev: TokenData = load_tokens(dev_file)
+    test: TokenData = load_tokens(test_file)
 
     # lower tokens
     if args.lower:
-        train_tokens, dev_tokens, test_tokens = [
+        train.tokens, dev.tokens, test.tokens = [
             [t.lower() for t in tokens]
             for tokens
-            in (train_tokens, dev_tokens, test_tokens)
+            in (train.tokens, dev.tokens, test.tokens)
         ]
 
     # counters
-    token_counter = Counter(train_tokens + dev_tokens + test_tokens)
-    deprel_counter = Counter(train_deprel + dev_deprel + test_deprel)
-    postag_counter = Counter(train_postag + dev_postag + test_postag)
+    token_counter = Counter(train.tokens + dev.tokens + test.tokens)
+    deprel_counter = Counter(train.deprel + dev.deprel + test.deprel)
+    postag_counter = Counter(train.postag + dev.postag + test.postag)
     # TODO: unused
     # postag_ca_counter = Counter(train_postag_ca + dev_postag_ca + test_postag_ca)
-    # deprel_counter['ROOT'] = 1
     deprel_counter['self'] = 1
 
-    max_len = max(train_max_len, dev_max_len, test_max_len)
-    # post_counter = Counter(list(range(-max_len, max_len)))
+    max_len = max(train.max_len, dev.max_len, test.max_len)
     post_counter = Counter(list(range(0, max_len)))
     syn_post_counter = Counter(list(range(0, 5)))
 
     # build vocab
     print("building vocab...")
-    token_vocab = VocabHelp(token_counter, specials=['<pad>', '<unk>'])
-    post_vocab = VocabHelp(post_counter, specials=['<pad>', '<unk>'])
-    deprel_vocab = VocabHelp(deprel_counter, specials=['<pad>', '<unk>'])
-    postag_vocab = VocabHelp(postag_counter, specials=['<pad>', '<unk>'])
-    syn_post_vocab = VocabHelp(syn_post_counter, specials=['<pad>', '<unk>'])
+    token_vocab = VocabHelp(token_counter, specials=DefaultSpecials)
+    post_vocab = VocabHelp(post_counter, specials=DefaultSpecials)
+    deprel_vocab = VocabHelp(deprel_counter, specials=DefaultSpecials)
+    postag_vocab = VocabHelp(postag_counter, specials=DefaultSpecials)
+    syn_post_vocab = VocabHelp(syn_post_counter, specials=DefaultSpecials)
     print("token_vocab: {}, post_vocab: {}, syn_post_vocab: {}, deprel_vocab: {}, postag_vocab: {}".format(
         len(token_vocab), len(post_vocab), len(syn_post_vocab), len(deprel_vocab), len(postag_vocab)))
 
     print("dumping to files...")
+    # TODO: unused
     # token_vocab.save_vocab(vocab_tok_file)
     post_vocab.save_vocab(vocab_post_file)
     deprel_vocab.save_vocab(vocab_deprel_file)
@@ -133,18 +136,27 @@ def main():
     print("all done.")
 
 
-def load_tokens(filename):
-    with open(filename) as infile:
-        data = json.load(infile)
-        tokens = []
-        deprel = []
-        postag = []
-        postag_ca = []
+class TokenData(NamedTuple):
+    tokens: List[str]
+    deprel: List[str]
+    postag: List[Tuple]
+    postag_ca: List[str]
+    max_len: int
 
-        max_len = 0
+
+def load_tokens(filename: str) -> TokenData:
+    with open(filename) as infile:
+        data: JSON = json.load(infile)
+        tokens: List[str] = []
+        deprel: List[str] = []
+        postag: List[Tuple] = []
+        postag_ca: List[str] = []
+
+        max_len: int = 0
         for d in data:
-            sentence = d['sentence'].split()
-            tokens.extend(sentence)
+            sentence: str = d['sentence']
+            sentence_words = sentence.split()
+            tokens.extend(sentence_words)
             deprel.extend(d['deprel'])
             postag_ca.extend(d['postag'])
             # postag.extend(d['postag'])
@@ -155,10 +167,11 @@ def load_tokens(filename):
                     tup = tuple(sorted([d['postag'][i], d['postag'][j]]))
                     tmp_pos.append(tup)
             postag.extend(tmp_pos)
+            max_len = max(len(sentence_words), max_len)
 
-            max_len = max(len(sentence), max_len)
-    print("{} tokens from {} examples loaded from {}.".format(len(tokens), len(data), filename))
-    return tokens, deprel, postag, postag_ca, max_len
+    print("{} tokens from {} examples loaded from {}.".format(
+        len(tokens), len(data), filename))
+    return TokenData(tokens, deprel, postag, postag_ca, max_len)
 
 
 if __name__ == '__main__':
